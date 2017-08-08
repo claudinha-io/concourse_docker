@@ -65,18 +65,8 @@
         name: docker-py
         version: 1.9.0
         state: present
-        # executable: pip3
       when: ansible_version is defined
         and ansible_version.full | version_compare('2.2.0.0', '<')
-
-    # - name: Install requests
-    #   pip:
-    #     name: requests
-    #     state: present
-    #     executable: pip3
-    #   when: (ansible_version is defined
-    #     and ansible_version.full | version_compare('2.2.0.0', '>='))
-    #     or ansible_version is not defined
 
     - name: Install docker-py
       pip:
@@ -105,7 +95,6 @@
         name: concourse-db
         state: started
         image: postgres:9.5
-        # env_file: '.env'
         env:
           POSTGRES_DB: "{{ POSTGRES_DB }}"
           POSTGRES_USER: "{{ POSTGRES_USER }}"
