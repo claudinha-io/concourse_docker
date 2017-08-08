@@ -1,0 +1,144 @@
+- hosts: concourse-server
+  become: true
+  vars_files:
+    - .env
+
+  pre_tasks:
+    - name: Install apt-transport-https if necessary.
+      apt:
+        name: apt-transport-https
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Install ntpdate
+      apt:
+        name: ntpdate
+        state: present
+
+    - command: 'ntpdate -s pool.ntp.br'
+
+    - name: Hostname | Update the hostname - (/etc/hosts)
+      lineinfile:
+        dest: /etc/hosts
+        regexp: "^{{ ansible_eth0.ipv4.address }}"
+        line: "{{ ansible_eth0.ipv4.address }}    {{ inventory_hostname }}   {{ inventory_hostname_short }}"
+        state: present
+
+  tasks:
+    - name: ensure repository key is installed
+      apt_key:
+        id: "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+        keyserver: "hkp://p80.pool.sks-keyservers.net:80"
+        state: present
+
+    - name: ensure docker registry is available
+      # For Debian Jessie 8.0 LTS, use this repository:
+      apt_repository:
+        repo: 'deb [arch=amd64] https://download.docker.com/linux/debian jessie stable'
+        state: present
+      # For Ubuntu 16.04 LTS, use this repo instead:
+      # apt_repository: repo='deb https://apt.dockerproject.org/repo ubuntu-xenial main' state=present
+
+    - name: ensure docker and dependencies are installed
+      apt:
+        name: "{{ item }}"
+        state: latest
+        update_cache: yes
+        cache_valid_time: 86400
+      with_items:
+        - python-dev
+        - docker-ce
+        - curl
+
+    - name: Install "python-pip" package
+      command: "{{ item.cmd }}"
+      with_items:
+        - { cmd: 'curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py' }
+        - { cmd: 'python /tmp/get-pip.py' }
+
+    - service:
+        name: docker
+        state: started
+
+    - name: Install docker-py 1.9.0 to fix Ansible issue #17495
+      pip:
+        name: docker-py
+        version: 1.9.0
+        state: present
+        # executable: pip3
+      when: ansible_version is defined
+        and ansible_version.full | version_compare('2.2.0.0', '<')
+
+    # - name: Install requests
+    #   pip:
+    #     name: requests
+    #     state: present
+    #     executable: pip3
+    #   when: (ansible_version is defined
+    #     and ansible_version.full | version_compare('2.2.0.0', '>='))
+    #     or ansible_version is not defined
+
+    - name: Install docker-py
+      pip:
+        name: docker-py
+        state: present
+      when: (ansible_version is defined
+        and ansible_version.full | version_compare('2.2.0.0', '>='))
+        or ansible_version is not defined
+
+    - stat: path=./keys/web/authorized_worker_keys
+      register: web_keys
+
+    - name: Copy Script to create keys
+      copy:
+        src: 'scripts/create_keys.sh'
+        dest: '/tmp/create_keys.sh'
+        mode: "u+x,g+x,o+x"
+      when: web_keys.stat.exists == False
+
+    - name: Execute script to create keys
+      command: 'sh /tmp/create_keys.sh'
+      when: web_keys.stat.exists == False
+
+    - name: Create a Postgres Database container
+      docker_container:
+        name: concourse-db
+        state: started
+        image: postgres:9.5
+        # env_file: '.env'
+        env:
+          POSTGRES_DB: "{{ POSTGRES_DB }}"
+          POSTGRES_USER: "{{ POSTGRES_USER }}"
+          POSTGRES_PASSWORD: "{{ POSTGRES_PASSWORD }}"
+          PGDATA: /database
+
+    - name: Create a Web Concourse App container
+      docker_container:
+        name: concourse-web
+        state: started
+        image: concourse/concourse
+        links: concourse-db
+        command: web
+        ports: "8080:8080"
+        volumes: "./keys/web:/concourse-keys"
+        restart_policy: unless-stopped # required so that it retries until conocurse-db comes up
+        env:
+          CONCOURSE_BASIC_AUTH_USERNAME: "{{ CONCOURSE_BASIC_AUTH_USERNAME }}"
+          CONCOURSE_BASIC_AUTH_PASSWORD: "{{ CONCOURSE_BASIC_AUTH_PASSWORD }}"
+          CONCOURSE_EXTERNAL_URL: "{{ CONCOURSE_EXTERNAL_URL }}"
+          CONCOURSE_POSTGRES_HOST: concourse-db
+          CONCOURSE_POSTGRES_USER: "{{ POSTGRES_USER }}"
+          CONCOURSE_POSTGRES_PASSWORD: "{{ POSTGRES_PASSWORD }}"
+          CONCOURSE_POSTGRES_DATABASE: "{{ POSTGRES_DB }}"
+
+    - name: Create a Web Concourse App container
+      docker_container:
+        name: concourse-worker
+        state: started
+        image: concourse/concourse
+        privileged: true
+        links: concourse-web
+        command: worker
+        volumes: "./keys/worker:/concourse-keys"
+        env:
+          CONCOURSE_TSA_HOST: concourse-web
